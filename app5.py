@@ -1,7 +1,7 @@
 """
 Impact Radar — Enterprise Software Change Impact Analysis Platform
 ------------------------------------------------------------------
-Run:  streamlit run app4.py
+Run:  streamlit run app5.py
 Keep the .streamlit/config.toml next to this file (it sets the dark theme),
 though the app also forces its own dark theme via injected CSS.
 
@@ -24,6 +24,7 @@ from project_service import (
     add_module,
     add_dependency,
 )
+from report_service import build_pdf_report
 
 st.set_page_config(page_title="Impact Radar", page_icon="◎", layout="wide")
 
@@ -135,6 +136,18 @@ st.markdown(
     "ul[role='listbox'] { background-color: #111726; }"
     "ul[role='listbox'] li { color: #e5e9f0; }"
     ".stTextInput input, .stTextArea textarea { background-color: #111726; color: #e5e9f0; border-color: #1f2937; }"
+    # --- Buttons: keep them visible & legible on the dark theme ---
+    # The download button in particular was rendering with dark text on a
+    # dark/transparent background, making it effectively invisible.
+    ".stButton > button, .stDownloadButton > button {"
+    " background-color: #6366f1; color: #ffffff; border: 1px solid #6366f1;"
+    " font-weight: 600; border-radius: 8px; padding: 0.45rem 1rem; }"
+    ".stButton > button:hover, .stDownloadButton > button:hover {"
+    " background-color: #4f54d6; border-color: #4f54d6; color: #ffffff; }"
+    ".stButton > button:active, .stButton > button:focus,"
+    ".stDownloadButton > button:active, .stDownloadButton > button:focus {"
+    " color: #ffffff; box-shadow: 0 0 0 2px rgba(99,102,241,0.4); }"
+    ".stButton > button *, .stDownloadButton > button * { color: #ffffff; }"
     "</style>",
     unsafe_allow_html=True,
 )
@@ -199,6 +212,9 @@ if page == "Dashboard":
             "total_impacted": len(impacted),
             "risk": level,
             "generated_at": datetime.now().strftime("%d-%b-%Y %I:%M %p"),
+            # snapshot the dependency map so the PDF can redraw the graph
+            # exactly as it was when the analysis ran
+            "modules": {m: list(deps) for m, deps in modules.items()},
         }
 
     # --- KPI strip ---
@@ -403,6 +419,14 @@ elif page == "Reports":
             st.divider()
             st.write(f"**Total Impacted Modules:** {report['total_impacted']}")
 
+            if report["total_impacted"] == 0:
+                st.info(
+                    f"No dependencies found — nothing depends on "
+                    f"**{report['changed_module']}**, so this change has no "
+                    "downstream impact and is safe to ship. This is also "
+                    "noted in the downloaded PDF report."
+                )
+
             if report["risk"] == "HIGH":
                 recommendation = "Full regression testing is recommended."
             elif report["risk"] == "MEDIUM":
@@ -413,37 +437,23 @@ elif page == "Reports":
             st.markdown("### Recommendation")
             st.success(recommendation)
 
-            report_text = f"""IMPACT ANALYSIS REPORT
-====================================
+            st.divider()
 
-Project:
-{report['project']}
-
-Generated:
-{report['generated_at']}
-
-Changed Module:
-{report['changed_module']}
-
-Risk Level:
-{report['risk']}
-
-Directly Affected Modules:
-{', '.join(report['direct'])}
-
-Indirectly Affected Modules:
-{', '.join(report['indirect'])}
-
-Total Impacted Modules:
-{report['total_impacted']}
-
-Recommendation:
-{recommendation}
-"""
-
-            st.download_button(
-                label="Download Report",
-                data=report_text,
-                file_name="impact_report.txt",
-                mime="text/plain",
-            )
+            # Build the rich, chart-embedded PDF. Generated on demand so a
+            # broken report never blocks the rest of the page from rendering.
+            try:
+                pdf_bytes = build_pdf_report(report)
+                safe_name = (
+                    f"impact_report_{report['project']}_"
+                    f"{report['changed_module']}.pdf"
+                    .replace(" ", "_")
+                )
+                st.download_button(
+                    label="⬇  Download PDF report",
+                    data=pdf_bytes,
+                    file_name=safe_name,
+                    mime="application/pdf",
+                    type="primary",
+                )
+            except Exception as exc:  # pragma: no cover - defensive UI guard
+                st.error(f"Could not generate the PDF report: {exc}")
